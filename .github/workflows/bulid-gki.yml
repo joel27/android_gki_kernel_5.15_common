@@ -1,0 +1,251 @@
+name: GKI (vermeer · android13-5.15)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+      CCACHE_DIR: /home/runner/.ccache
+
+    steps:
+      - name: Checkout GKI kernel source (android13-5.15-2025-07)
+        uses: actions/checkout@v4
+        with:
+          repository: joel27/android_gki_kernel_5.15_common
+          ref: android13-5.15-2025-07
+          fetch-depth: 1
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-vermeer-gki-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-vermeer-gki-
+
+      - name: Install dependencies (incluyendo ccache)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git make bc bison flex libssl-dev \
+            libelf-dev python3 ccache \
+            gcc-aarch64-linux-gnu zstd lld llvm-14
+
+      # Este repo pide CLANG_VERSION=r563880 en build.config.constants (jul-2025).
+      # r584948b es más nueva pero de la misma línea AOSP que ya usas en xaga, así
+      # que la dejo por consistencia con tu setup actual. Si algo no compila por
+      # warnings-as-errors nuevos del compilador, este es el primer sospechoso
+      # (mucho menos probable aquí que en el repo del chipset: ver ese workflow).
+      - name: Setup Clang r584948b
+        run: |
+          mkdir -p clang
+          curl -L -o clang.tar.gz \
+            "https://github.com/bachnxuan/aosp_clang_mirror/releases/download/clang-r584948b-14726520/clang-r584948b.tar.gz"
+          tar -xzf clang.tar.gz -C clang
+          echo "$PWD/clang/bin" >> $GITHUB_PATH
+          sudo ln -sf /usr/bin/llvm-ar-14      /usr/bin/llvm-ar
+          sudo ln -sf /usr/bin/llvm-nm-14      /usr/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
+          sudo ln -sf /usr/bin/llvm-objdump-14 /usr/bin/llvm-objdump
+          sudo ln -sf /usr/bin/llvm-strip-14   /usr/bin/llvm-strip
+          clang --version
+          ld.lld --version
+          ccache --version
+
+      - name: Clean build tree
+        run: |
+          rm -rf out
+          rm -f .config .config.old
+          rm -rf include/config include/generated
+
+      - name: Install ReSukiSU (inline hook)
+        run: |
+          curl -fsSL \
+            "https://raw.githubusercontent.com/joel27/ReSukiSU/main/kernel/setup.sh" \
+            | bash -s main
+          echo "ReSukiSU installed"
+
+      - name: Fix sulog type mismatch
+        run: |
+          SULOG=drivers/kernelsu/sulog/event.c
+          if [ -f "$SULOG" ]; then
+            sed -i 's/USER_ARG_NULL,/\&(struct user_arg_ptr){ 0 },/g' "$SULOG"
+            echo "Patched $SULOG"
+          fi
+
+      # FIX: branch/parche actualizados de gki-android12-5.10 a gki-android13-5.15
+      # (verificado que existe en gitlab.com/simonpunk/susfs4ksu).
+      - name: Apply SuSFS (susfs4ksu 50_)
+        run: |
+          git clone --depth=1 -b gki-android13-5.15 \
+            https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu
+          cp -R /tmp/susfs4ksu/kernel_patches/fs/*      fs/
+          cp -R /tmp/susfs4ksu/kernel_patches/include/* include/
+          patch -p1 --fuzz=3 --no-backup-if-mismatch \
+            < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch
+          echo "SuSFS base applied"
+
+      # ELIMINADO respecto a tus workflows de xaga: el "stock_config patch" de
+      # esk_builder. Ese parche mete un arch/arm64/configs/stock_gki_defconfig
+      # *hardcodeado* que se anuncia como "Linux/arm64 5.10.198" (clang 12.0.5,
+      # r416183b). Aplicado tal cual sobre un kernel 5.15 dejaría /proc/config.gz
+      # anunciando una versión de kernel que no coincide con la real (uname),
+      # lo cual llama más la atención que no tocar nada. Si quieres esa máscara
+      # para 5.15 hace falta generar un stock_gki_defconfig nuevo desde un
+      # kernel 5.15.x real (p.ej. con "make savedefconfig" sobre un .config de
+      # stock) antes de poder reusar el mismo mecanismo aquí.
+
+      # FIX: ruta actualizada de android12-5.10 a android13-5.15 (confirmado que
+      # existe en Enginex0/Super-Builders con ese nombre exacto de archivo).
+      - name: Apply ZeroMount VFS patch
+        run: |
+          git clone --depth=1 \
+            https://github.com/Enginex0/Super-Builders.git /tmp/sb
+          PATCH="/tmp/sb/android13-5.15/ReSukiSU/patches/60_zeromount-android13-5.15.patch"
+          if [ -f "$PATCH" ]; then
+            patch -p1 --fuzz=3 --no-backup-if-mismatch < "$PATCH" || true
+            echo "ZeroMount applied"
+          fi
+
+      - name: Fix task_mmu.c for ZeroMount
+        run: |
+          if [ -f fs/proc/task_mmu.c ]; then
+            sed -i \
+              's/zeromount_spoof_mmap_metadata(inode,/zeromount_spoof_mmap_metadata(vma->vm_file ? file_inode(vma->vm_file) : NULL,/g' \
+              fs/proc/task_mmu.c
+            echo "task_mmu.c fixed"
+          fi
+
+      - name: Remove unused zm_out labels
+        run: |
+          find . -name "*.c" \
+            -exec sed -i '/^[[:space:]]*zm_out:[[:space:]]*$/d' {} \;
+          echo "zm_out labels removed"
+
+      - name: Generate defconfig
+        run: |
+          mkdir -p out
+          make O=out ARCH=arm64 \
+            CC="ccache clang" LLVM=1 LD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            gki_defconfig
+
+      - name: Configure kernel
+        run: |
+          ./scripts/config --file out/.config \
+            --enable  CONFIG_LTO_CLANG \
+            --enable  CONFIG_LTO_CLANG_THIN \
+            --disable CONFIG_LTO_CLANG_FULL \
+            --enable  CONFIG_KSU \
+            --enable  CONFIG_KSU_SUSFS \
+            --enable  CONFIG_KSU_INLINE_HOOK \
+            --disable CONFIG_KSU_KPROBES_HOOK \
+            --disable CONFIG_KSU_TRACEPOINT_HOOK \
+            --enable  CONFIG_PSTORE \
+            --enable  CONFIG_PSTORE_RAM \
+            --enable  CONFIG_PSTORE_CONSOLE \
+            --enable  CONFIG_ZEROMOUNT \
+            --enable  CONFIG_TCP_CONG_BBR \
+            --set-str CONFIG_SYSTEM_TRUSTED_KEYS "" \
+            --set-str CONFIG_SYSTEM_EXTRA_CERTIFICATE "" \
+            --disable CONFIG_SYSTEM_EXTRA_CERTIFICATE \
+            --disable CONFIG_INTEGRITY_SIGNATURE \
+            --disable CONFIG_IMA_APPRAISE \
+            --set-str CONFIG_LOCALVERSION "-Tech-Kernel" \
+            --disable CONFIG_LOCALVERSION_AUTO
+
+          # FIX: el símbolo real en Kconfig es CONFIG_LLVM_POLLY, no CONFIG_POLLY
+          # (confirmado en arch/Kconfig de este repo — "Polly" es el optimizador
+          # poliédrico de bucles de LLVM). En esta rama, gki_defconfig trae
+          # CONFIG_LLVM_POLLY=y de fábrica junto con CONFIG_LTO_CLANG_FULL=y, así
+          # que este --disable sí hace algo real aquí. En tus workflows viejos,
+          # con el nombre equivocado, scripts/config no encontraba la entrada y
+          # no desactivaba nada (el "|| true" escondía el no-op). Se desactiva
+          # porque el clang mirror que usamos normalmente no viene compilado con
+          # soporte Polly, y "-mllvm -polly" puede romper la build con ese
+          # toolchain o ser ignorado de forma inconsistente.
+          ./scripts/config --file out/.config --disable CONFIG_LLVM_POLLY || true
+
+      - name: Finalize config
+        run: |
+          make O=out ARCH=arm64 \
+            CC="ccache clang" LLVM=1 LD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            olddefconfig
+
+      - name: Build kernel (con ccache)
+        run: |
+          make -j$(nproc) O=out ARCH=arm64 \
+            CC="ccache clang" LLVM=1 LD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            KBUILD_BUILD_TIMESTAMP="$(date -u +'%a %b %d %H:%M:%S UTC %Y')" \
+            KBUILD_BUILD_USER="builder" \
+            KBUILD_BUILD_HOST="esk" \
+            Image 2>&1 | tee build.log
+
+      - name: Package AnyKernel3
+        run: |
+          git clone --depth=1 \
+            https://github.com/ESK-Project/AnyKernel3.git \
+            -b generic AnyKernel3
+          rm -rf AnyKernel3/config AnyKernel3/modules \
+                 AnyKernel3/patch  AnyKernel3/ramdisk
+          cp out/arch/arm64/boot/Image AnyKernel3/Image
+          zstd -19 --no-progress -q \
+            -o AnyKernel3/Image.zst AnyKernel3/Image
+          rm AnyKernel3/Image
+          cd AnyKernel3
+          sha256sum Image.zst > Image.zst.sha256
+          printf '%s\n' \
+            "properties() { '" \
+            'kernel.string=Tech-Kernel GKI android13-5.15 | ReSukiSU+SUSFS+ZeroMount | vermeer' \
+            'do.devicecheck=0' \
+            'do.modules=0' \
+            'do.systemless=0' \
+            'do.cleanup=1' \
+            'do.cleanuponabort=0' \
+            'supported.versions=' \
+            "'; }" \
+            'BLOCK=boot' \
+            'IS_SLOT_DEVICE=1' \
+            'RAMDISK_COMPRESSION=auto' \
+            'PATCH_VBMETA_FLAG=auto' \
+            'NO_MAGISK_CHECK=true' \
+            '. tools/ak3-core.sh' \
+            'ui_print "****************************************"' \
+            'ui_print "   Instalando Tech-Kernel android13-5.15 "' \
+            'ui_print "   Basado en GKI puro (sin merge vendor) "' \
+            'ui_print "****************************************"' \
+            '"$BIN/busybox" sha256sum -cs Image.zst.sha256 || abort "[!] SHA256 mismatch"' \
+            '"$BIN/zstd" -d -q --no-progress -o "$AKHOME/Image" "$AKHOME/Image.zst" || abort "[!] Decompress failed"' \
+            'split_boot' \
+            'if [ -f "$SPLITIMG/ramdisk.cpio" ]; then' \
+            '  unpack_ramdisk; write_boot' \
+            'else' \
+            '  flash_boot' \
+            'fi' \
+            'rm -f "$AKHOME/Image"' \
+            > anykernel.sh
+          cd ..
+          cd AnyKernel3
+          zip -r9 ../Tech-Kernel-android13-5.15-Gki-vermeer.zip . \
+            -x ".git*" -x "*.md"
+
+      - name: Upload kernel zip
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tech-Kernel-android13-5.15-Gki-vermeer
+          path: Tech-Kernel-android13-5.15-Gki-vermeer.zip
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-gki
+          path: build.log
