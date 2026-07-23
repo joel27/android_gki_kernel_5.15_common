@@ -1,4 +1,4 @@
-name: GKI (vermeer · android13-5.15)
+name: ReSukiSU Tech-Kernel GKI (vermeer · android13-5.15)
 
 on:
   workflow_dispatch:
@@ -36,23 +36,27 @@ jobs:
             libelf-dev python3 ccache \
             gcc-aarch64-linux-gnu zstd lld llvm-14
 
-      # Este repo pide CLANG_VERSION=r563880 en build.config.constants (jul-2025).
-      # r584948b es más nueva pero de la misma línea AOSP que ya usas en xaga, así
-      # que la dejo por consistencia con tu setup actual. Si algo no compila por
-      # warnings-as-errors nuevos del compilador, este es el primer sospechoso
-      # (mucho menos probable aquí que en el repo del chipset: ver ese workflow).
-      - name: Setup Clang r584948b
+      # FIX (tras ver los build logs): con clang r584948b esta rama falla por
+      # warnings nuevos del compilador que -Werror convierte en error
+      # (-Wuninitialized-const-pointer en arch/arm64/kvm/sys_regs.c,
+      # -Wdefault-const-init-var-unsafe en fs/verity, kernel/bpf, mm/memcontrol,
+      # etc.) — diagnósticos que no existían cuando esta rama se congeló en
+      # r563880. Cambio a la versión EXACTA que build.config.constants pide,
+      # clonada directo del repo oficial de Google (no depende de que un mirror
+      # de terceros tenga cacheada justo esta versión).
+      - name: Setup Clang r563880 (versión que este repo espera)
         run: |
-          mkdir -p clang
-          curl -L -o clang.tar.gz \
-            "https://github.com/bachnxuan/aosp_clang_mirror/releases/download/clang-r584948b-14726520/clang-r584948b.tar.gz"
-          tar -xzf clang.tar.gz -C clang
-          echo "$PWD/clang/bin" >> $GITHUB_PATH
+          git clone --depth=1 --branch clang-r563880 \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            clang_src
+          CLANG_BIN=$(dirname "$(find clang_src -maxdepth 4 -type f -name clang -perm -u+x | head -n1)")
+          echo "$PWD/$CLANG_BIN" >> $GITHUB_PATH
           sudo ln -sf /usr/bin/llvm-ar-14      /usr/bin/llvm-ar
           sudo ln -sf /usr/bin/llvm-nm-14      /usr/bin/llvm-nm
           sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
           sudo ln -sf /usr/bin/llvm-objdump-14 /usr/bin/llvm-objdump
           sudo ln -sf /usr/bin/llvm-strip-14   /usr/bin/llvm-strip
+          export PATH="$PWD/$CLANG_BIN:$PATH"
           clang --version
           ld.lld --version
           ccache --version
@@ -121,11 +125,20 @@ jobs:
             echo "task_mmu.c fixed"
           fi
 
+      # FIX (tras ver el build log de la rama 2025-07): el sed anterior borraba
+      # TODAS las etiquetas "zm_out:" sueltas, incluso en archivos donde sí se
+      # usa con "goto zm_out" (pasó en fs/readdir.c), dejando un goto apuntando
+      # a una etiqueta inexistente → "error: use of undeclared label 'zm_out'".
+      # Ahora solo se borra en archivos donde NO hay ningún "goto zm_out" en el
+      # mismo archivo, es decir donde de verdad quedó sin usar.
       - name: Remove unused zm_out labels
         run: |
-          find . -name "*.c" \
-            -exec sed -i '/^[[:space:]]*zm_out:[[:space:]]*$/d' {} \;
-          echo "zm_out labels removed"
+          while IFS= read -r f; do
+            if ! grep -q "goto zm_out" "$f"; then
+              sed -i '/^[[:space:]]*zm_out:[[:space:]]*$/d' "$f"
+            fi
+          done < <(grep -rl '^[[:space:]]*zm_out:[[:space:]]*$' --include="*.c" .)
+          echo "zm_out labels cleaned (solo las que de verdad no se usan)"
 
       - name: Generate defconfig
         run: |
