@@ -1,4 +1,4 @@
-name: ReSukiSU Tech-Kernel GKI (vermeer · android13-5.15)
+name: GKI (vermeer · android13-5.15)
 
 on:
   workflow_dispatch:
