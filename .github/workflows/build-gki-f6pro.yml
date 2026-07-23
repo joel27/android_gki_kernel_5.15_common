@@ -44,19 +44,36 @@ jobs:
       # r563880. Cambio a la versión EXACTA que build.config.constants pide,
       # clonada directo del repo oficial de Google (no depende de que un mirror
       # de terceros tenga cacheada justo esta versión).
+      # FIX #2 (el intento anterior falló): prebuilts/clang/host/linux-x86 NO
+      # tiene una rama git por cada versión — es un monorepo donde todas las
+      # versiones viven como carpetas (clang-r563880/, clang-r450784e/, etc.)
+      # dentro de la rama "main". La forma correcta de bajar solo una versión
+      # sin clonar el repo entero (pesaría decenas de GB) es el endpoint
+      # "+archive" de Gitiles, que sirve un tarball de esa carpeta puntual.
       - name: Setup Clang r563880 (versión que este repo espera)
         run: |
-          git clone --depth=1 --branch clang-r563880 \
-            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-            clang_src
-          CLANG_BIN=$(dirname "$(find clang_src -maxdepth 4 -type f -name clang -perm -u+x | head -n1)")
-          echo "$PWD/$CLANG_BIN" >> $GITHUB_PATH
+          mkdir -p clang
+          DL_OK=0
+          for REF in "refs/heads/main" "main"; do
+            URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${REF}/clang-r563880.tar.gz"
+            echo "Intentando: $URL"
+            if curl -fL -o clang.tar.gz "$URL"; then
+              DL_OK=1
+              break
+            fi
+          done
+          if [ "$DL_OK" -ne 1 ]; then
+            echo "No se pudo descargar clang-r563880 desde ningun ref probado (main)." >&2
+            exit 1
+          fi
+          tar -xzf clang.tar.gz -C clang
+          echo "$PWD/clang/bin" >> $GITHUB_PATH
           sudo ln -sf /usr/bin/llvm-ar-14      /usr/bin/llvm-ar
           sudo ln -sf /usr/bin/llvm-nm-14      /usr/bin/llvm-nm
           sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
           sudo ln -sf /usr/bin/llvm-objdump-14 /usr/bin/llvm-objdump
           sudo ln -sf /usr/bin/llvm-strip-14   /usr/bin/llvm-strip
-          export PATH="$PWD/$CLANG_BIN:$PATH"
+          export PATH="$PWD/clang/bin:$PATH"
           clang --version
           ld.lld --version
           ccache --version
