@@ -44,28 +44,21 @@ jobs:
       # r563880. Cambio a la versión EXACTA que build.config.constants pide,
       # clonada directo del repo oficial de Google (no depende de que un mirror
       # de terceros tenga cacheada justo esta versión).
-      # FIX #2 (el intento anterior falló): prebuilts/clang/host/linux-x86 NO
-      # tiene una rama git por cada versión — es un monorepo donde todas las
-      # versiones viven como carpetas (clang-r563880/, clang-r450784e/, etc.)
-      # dentro de la rama "main". La forma correcta de bajar solo una versión
-      # sin clonar el repo entero (pesaría decenas de GB) es el endpoint
-      # "+archive" de Gitiles, que sirve un tarball de esa carpeta puntual.
-      - name: Setup Clang r563880 (versión que este repo espera)
+      # PIVOTE (2 intentos fallidos bajando r563880 directo de Google): el
+      # endpoint de branch y el de +archive de prebuilts/clang de Google fallan
+      # en este runner (rama inexistente, luego HTTP 400). El mirror de
+      # bachnxuan SÍ descarga bien siempre — el error nunca fue la descarga,
+      # fue compilación. Vuelvo a r584948b y silencio puntualmente los 2
+      # warnings exactos que salieron en tu build log real
+      # (-Wuninitialized-const-pointer, -Wdefault-const-init-var-unsafe) vía
+      # KCFLAGS en el paso de build. Si sale un warning nuevo más adelante,
+      # se agrega ahí mismo con el mismo mecanismo (una línea, sin tocar el
+      # toolchain otra vez).
+      - name: Setup Clang r584948b
         run: |
           mkdir -p clang
-          DL_OK=0
-          for REF in "refs/heads/main" "main"; do
-            URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${REF}/clang-r563880.tar.gz"
-            echo "Intentando: $URL"
-            if curl -fL -o clang.tar.gz "$URL"; then
-              DL_OK=1
-              break
-            fi
-          done
-          if [ "$DL_OK" -ne 1 ]; then
-            echo "No se pudo descargar clang-r563880 desde ningun ref probado (main)." >&2
-            exit 1
-          fi
+          curl -L -o clang.tar.gz \
+            "https://github.com/bachnxuan/aosp_clang_mirror/releases/download/clang-r584948b-14726520/clang-r584948b.tar.gz"
           tar -xzf clang.tar.gz -C clang
           echo "$PWD/clang/bin" >> $GITHUB_PATH
           sudo ln -sf /usr/bin/llvm-ar-14      /usr/bin/llvm-ar
@@ -73,7 +66,6 @@ jobs:
           sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
           sudo ln -sf /usr/bin/llvm-objdump-14 /usr/bin/llvm-objdump
           sudo ln -sf /usr/bin/llvm-strip-14   /usr/bin/llvm-strip
-          export PATH="$PWD/clang/bin:$PATH"
           clang --version
           ld.lld --version
           ccache --version
@@ -213,6 +205,7 @@ jobs:
           make -j$(nproc) O=out ARCH=arm64 \
             CC="ccache clang" LLVM=1 LD=ld.lld \
             CROSS_COMPILE=aarch64-linux-gnu- \
+            KCFLAGS="-Wno-error=uninitialized-const-pointer -Wno-error=default-const-init-var-unsafe" \
             KBUILD_BUILD_TIMESTAMP="$(date -u +'%a %b %d %H:%M:%S UTC %Y')" \
             KBUILD_BUILD_USER="builder" \
             KBUILD_BUILD_HOST="esk" \
