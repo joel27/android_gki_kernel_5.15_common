@@ -42,22 +42,16 @@ jobs:
           mkdir -p clang
           echo "Descargando clang-r450784e (versión oficial)..."
           
-          DL_OK=0
-          for REF in "refs/heads/main" "main"; do
-            URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${REF}/clang-r450784e.tar.gz"
-            echo "Intentando: $URL"
-            if curl -fL -o clang.tar.gz "$URL"; then
-              DL_OK=1
-              break
-            fi
-          done
-          if [ "$DL_OK" -ne 1 ]; then
-            echo "No se pudo descargar clang-r450784e" >&2
-            exit 1
-          fi
+          # Mirror confiable (ravindu644)
+          curl -fL -o clang.tar.gz "https://github.com/ravindu644/Android-Kernel-Tutorials/releases/download/toolchains/clang-r450784e.tar.gz" || {
+            echo "Fallo en mirror principal, intentando Gitiles..."
+            curl -fL -o clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r450784e.tar.gz"
+          }
           
           tar -xzf clang.tar.gz -C clang
+          
           echo "$PWD/clang/bin" >> $GITHUB_PATH
+          export PATH="$PWD/clang/bin:$PATH"
           
           sudo ln -sf /usr/bin/llvm-ar-14      /usr/bin/llvm-ar || true
           sudo ln -sf /usr/bin/llvm-nm-14      /usr/bin/llvm-nm || true
@@ -65,10 +59,10 @@ jobs:
           sudo ln -sf /usr/bin/llvm-objdump-14 /usr/bin/llvm-objdump || true
           sudo ln -sf /usr/bin/llvm-strip-14   /usr/bin/llvm-strip || true
           
-          export PATH="$PWD/clang/bin:$PATH"
           clang --version
           ld.lld --version
           ccache --version
+          echo "Clang r450784e configurado correctamente"
 
       - name: Clean build tree
         run: |
