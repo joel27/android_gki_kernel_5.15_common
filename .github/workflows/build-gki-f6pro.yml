@@ -36,24 +36,10 @@ jobs:
             libelf-dev python3 ccache \
             gcc-aarch64-linux-gnu zstd lld llvm-14
 
-      # FIX (tras ver los build logs): con clang r584948b esta rama falla por
-      # warnings nuevos del compilador que -Werror convierte en error
-      # (-Wuninitialized-const-pointer en arch/arm64/kvm/sys_regs.c,
-      # -Wdefault-const-init-var-unsafe en fs/verity, kernel/bpf, mm/memcontrol,
-      # etc.) — diagnósticos que no existían cuando esta rama se congeló en
-      # r563880. Cambio a la versión EXACTA que build.config.constants pide,
-      # clonada directo del repo oficial de Google (no depende de que un mirror
-      # de terceros tenga cacheada justo esta versión).
-      # PIVOTE (2 intentos fallidos bajando r563880 directo de Google): el
-      # endpoint de branch y el de +archive de prebuilts/clang de Google fallan
-      # en este runner (rama inexistente, luego HTTP 400). El mirror de
-      # bachnxuan SÍ descarga bien siempre — el error nunca fue la descarga,
-      # fue compilación. Vuelvo a r584948b y silencio puntualmente los 2
-      # warnings exactos que salieron en tu build log real
-      # (-Wuninitialized-const-pointer, -Wdefault-const-init-var-unsafe) vía
-      # KCFLAGS en el paso de build. Si sale un warning nuevo más adelante,
-      # se agrega ahí mismo con el mismo mecanismo (una línea, sin tocar el
-      # toolchain otra vez).
+      # build.config.constants pide r563880, pero no se pudo bajar de forma
+      # confiable desde el repo oficial de Google. Se usa r584948b y se
+      # silencian con KCFLAGS (paso "Build kernel") los warnings nuevos que
+      # esa versión más moderna activa.
       - name: Setup Clang r584948b
         run: |
           mkdir -p clang
@@ -91,8 +77,6 @@ jobs:
             echo "Patched $SULOG"
           fi
 
-      # FIX: branch/parche actualizados de gki-android12-5.10 a gki-android13-5.15
-      # (verificado que existe en gitlab.com/simonpunk/susfs4ksu).
       - name: Apply SuSFS (susfs4ksu 50_)
         run: |
           git clone --depth=1 -b gki-android13-5.15 \
@@ -103,51 +87,9 @@ jobs:
             < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch
           echo "SuSFS base applied"
 
-      # ELIMINADO respecto a tus workflows de xaga: el "stock_config patch" de
-      # esk_builder. Ese parche mete un arch/arm64/configs/stock_gki_defconfig
-      # *hardcodeado* que se anuncia como "Linux/arm64 5.10.198" (clang 12.0.5,
-      # r416183b). Aplicado tal cual sobre un kernel 5.15 dejaría /proc/config.gz
-      # anunciando una versión de kernel que no coincide con la real (uname),
-      # lo cual llama más la atención que no tocar nada. Si quieres esa máscara
-      # para 5.15 hace falta generar un stock_gki_defconfig nuevo desde un
-      # kernel 5.15.x real (p.ej. con "make savedefconfig" sobre un .config de
-      # stock) antes de poder reusar el mismo mecanismo aquí.
-
-      # FIX: ruta actualizada de android12-5.10 a android13-5.15 (confirmado que
-      # existe en Enginex0/Super-Builders con ese nombre exacto de archivo).
-      - name: Apply ZeroMount VFS patch
-        run: |
-          git clone --depth=1 \
-            https://github.com/Enginex0/Super-Builders.git /tmp/sb
-          PATCH="/tmp/sb/android13-5.15/ReSukiSU/patches/60_zeromount-android13-5.15.patch"
-          if [ -f "$PATCH" ]; then
-            patch -p1 --fuzz=3 --no-backup-if-mismatch < "$PATCH" || true
-            echo "ZeroMount applied"
-          fi
-
-      - name: Fix task_mmu.c for ZeroMount
-        run: |
-          if [ -f fs/proc/task_mmu.c ]; then
-            sed -i \
-              's/zeromount_spoof_mmap_metadata(inode,/zeromount_spoof_mmap_metadata(vma->vm_file ? file_inode(vma->vm_file) : NULL,/g' \
-              fs/proc/task_mmu.c
-            echo "task_mmu.c fixed"
-          fi
-
-      # FIX (tras ver el build log de la rama 2025-07): el sed anterior borraba
-      # TODAS las etiquetas "zm_out:" sueltas, incluso en archivos donde sí se
-      # usa con "goto zm_out" (pasó en fs/readdir.c), dejando un goto apuntando
-      # a una etiqueta inexistente → "error: use of undeclared label 'zm_out'".
-      # Ahora solo se borra en archivos donde NO hay ningún "goto zm_out" en el
-      # mismo archivo, es decir donde de verdad quedó sin usar.
-      - name: Remove unused zm_out labels
-        run: |
-          while IFS= read -r f; do
-            if ! grep -q "goto zm_out" "$f"; then
-              sed -i '/^[[:space:]]*zm_out:[[:space:]]*$/d' "$f"
-            fi
-          done < <(grep -rl '^[[:space:]]*zm_out:[[:space:]]*$' --include="*.c" .)
-          echo "zm_out labels cleaned (solo las que de verdad no se usan)"
+      # No se incluye el "stock_config patch" de esk_builder (para esconder
+      # /proc/config.gz): estaba hardcodeado para kernel 5.10.198, sería
+      # inconsistente en 5.15. Se puede rehacer con un config real de 5.15.
 
       - name: Generate defconfig
         run: |
@@ -171,7 +113,6 @@ jobs:
             --enable  CONFIG_PSTORE \
             --enable  CONFIG_PSTORE_RAM \
             --enable  CONFIG_PSTORE_CONSOLE \
-            --enable  CONFIG_ZEROMOUNT \
             --enable  CONFIG_TCP_CONG_BBR \
             --set-str CONFIG_SYSTEM_TRUSTED_KEYS "" \
             --set-str CONFIG_SYSTEM_EXTRA_CERTIFICATE "" \
@@ -181,16 +122,9 @@ jobs:
             --set-str CONFIG_LOCALVERSION "-Tech-Kernel" \
             --disable CONFIG_LOCALVERSION_AUTO
 
-          # FIX: el símbolo real en Kconfig es CONFIG_LLVM_POLLY, no CONFIG_POLLY
-          # (confirmado en arch/Kconfig de este repo — "Polly" es el optimizador
-          # poliédrico de bucles de LLVM). En esta rama, gki_defconfig trae
-          # CONFIG_LLVM_POLLY=y de fábrica junto con CONFIG_LTO_CLANG_FULL=y, así
-          # que este --disable sí hace algo real aquí. En tus workflows viejos,
-          # con el nombre equivocado, scripts/config no encontraba la entrada y
-          # no desactivaba nada (el "|| true" escondía el no-op). Se desactiva
-          # porque el clang mirror que usamos normalmente no viene compilado con
-          # soporte Polly, y "-mllvm -polly" puede romper la build con ese
-          # toolchain o ser ignorado de forma inconsistente.
+          # Símbolo real: CONFIG_LLVM_POLLY (no CONFIG_POLLY). Este repo trae
+          # CONFIG_LLVM_POLLY=y de fábrica en gki_defconfig; se apaga porque
+          # el clang que usamos no viene con soporte Polly.
           ./scripts/config --file out/.config --disable CONFIG_LLVM_POLLY || true
 
       - name: Finalize config
@@ -205,7 +139,7 @@ jobs:
           make -j$(nproc) O=out ARCH=arm64 \
             CC="ccache clang" LLVM=1 LD=ld.lld \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            KCFLAGS="-Wno-error=uninitialized-const-pointer -Wno-error=default-const-init-var-unsafe" \
+            KCFLAGS="-Wno-error=uninitialized-const-pointer -Wno-error=default-const-init-unsafe" \
             KBUILD_BUILD_TIMESTAMP="$(date -u +'%a %b %d %H:%M:%S UTC %Y')" \
             KBUILD_BUILD_USER="builder" \
             KBUILD_BUILD_HOST="esk" \
@@ -226,7 +160,7 @@ jobs:
           sha256sum Image.zst > Image.zst.sha256
           printf '%s\n' \
             "properties() { '" \
-            'kernel.string=Tech-Kernel GKI android13-5.15 | ReSukiSU+SUSFS+ZeroMount | vermeer' \
+            'kernel.string=Tech-Kernel GKI android13-5.15 | ReSukiSU+SUSFS | vermeer' \
             'do.devicecheck=0' \
             'do.modules=0' \
             'do.systemless=0' \
@@ -272,3 +206,4 @@ jobs:
         with:
           name: build-log-gki
           path: build.log
+
