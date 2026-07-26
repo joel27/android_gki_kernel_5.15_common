@@ -87,16 +87,27 @@ jobs:
             < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch
           echo "SuSFS base applied"
 
-      # El task_mmu.c que copia SuSFS (arriba) usa VMA_PAD_START(vma), una
-      # macro de su feature SUS_MAPS que no está definida en este árbol. Se
-      # define como el comportamiento original (sin padding extra) para que
-      # compile; el resto de SuSFS (SUS_PATH, SUS_MOUNT, etc.) no se toca.
+      # CORRECCIÓN: el shim anterior insertaba la definición en la línea 1,
+      # ANTES de que se procesaran los #include del archivo. Este repo SÍ
+      # trae VMA_PAD_START ya definido de forma nativa (feature real de GKI
+      # para migración a páginas de 16KB, en pgsize_migration_inline.h), así
+      # que insertar en la línea 1 causaba "macro redefined" al llegar el
+      # #include real más abajo. Ahora se inserta DESPUÉS del último
+      # #include, con guarda #ifndef: si el header real ya lo definió, no
+      # hace nada; si no (como pasa en el repo msm-kernel), define el
+      # fallback.
       - name: Fix VMA_PAD_START (SuSFS SUS_MAPS shim)
         run: |
           FILE=fs/proc/task_mmu.c
-          if [ -f "$FILE" ] && grep -q "VMA_PAD_START" "$FILE" && ! grep -q "define VMA_PAD_START" "$FILE"; then
-            sed -i '1i #define VMA_PAD_START(vma) ((vma)->vm_end)' "$FILE"
-            echo "VMA_PAD_START definido"
+          if [ -f "$FILE" ] && grep -q "VMA_PAD_START" "$FILE"; then
+            LASTINC=$(grep -n '^#include' "$FILE" | tail -1 | cut -d: -f1)
+            if [ -n "$LASTINC" ]; then
+              awk -v n="$LASTINC" '
+                { print }
+                NR==n { print ""; print "#ifndef VMA_PAD_START"; print "#define VMA_PAD_START(vma) ((vma)->vm_end)"; print "#endif" }
+              ' "$FILE" > "$FILE.tmp" && mv "$FILE.tmp" "$FILE"
+              echo "Shim insertado tras el ultimo #include (con guarda ifndef)"
+            fi
           else
             echo "No hizo falta tocar nada"
           fi
