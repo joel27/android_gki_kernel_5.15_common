@@ -34,7 +34,7 @@ jobs:
           sudo apt-get install -y \
             git make bc bison flex libssl-dev \
             libelf-dev python3 ccache \
-            gcc-aarch64-linux-gnu zstd lld llvm-14
+            gcc-aarch64-linux-gnu zstd lld llvm-14 dwarves
 
       # build.config.constants pide r563880, pero no se pudo bajar de forma
       # confiable desde el repo oficial de Google. Se usa r584948b y se
@@ -86,6 +86,20 @@ jobs:
           patch -p1 --fuzz=3 --no-backup-if-mismatch \
             < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch
           echo "SuSFS base applied"
+
+      # El task_mmu.c que copia SuSFS (arriba) usa VMA_PAD_START(vma), una
+      # macro de su feature SUS_MAPS que no está definida en este árbol. Se
+      # define como el comportamiento original (sin padding extra) para que
+      # compile; el resto de SuSFS (SUS_PATH, SUS_MOUNT, etc.) no se toca.
+      - name: Fix VMA_PAD_START (SuSFS SUS_MAPS shim)
+        run: |
+          FILE=fs/proc/task_mmu.c
+          if [ -f "$FILE" ] && grep -q "VMA_PAD_START" "$FILE" && ! grep -q "define VMA_PAD_START" "$FILE"; then
+            sed -i '1i #define VMA_PAD_START(vma) ((vma)->vm_end)' "$FILE"
+            echo "VMA_PAD_START definido"
+          else
+            echo "No hizo falta tocar nada"
+          fi
 
       # No se incluye el "stock_config patch" de esk_builder (para esconder
       # /proc/config.gz): estaba hardcodeado para kernel 5.10.198, sería
@@ -206,4 +220,3 @@ jobs:
         with:
           name: build-log-gki
           path: build.log
-
