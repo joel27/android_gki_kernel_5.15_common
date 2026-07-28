@@ -1,4 +1,4 @@
-name: ReSukiSU Tech-Kernel LKM (vermeer · android13-5.15)
+name: ReSukisu LKM
 
 on:
   workflow_dispatch:
@@ -146,6 +146,20 @@ jobs:
             CC="ccache clang" LLVM=1 LD=ld.lld \
             CROSS_COMPILE=aarch64-linux-gnu- \
             modules_prepare 2>&1 | tee prepare.log
+
+      # drivers/kernelsu toca SELinux (allowlist/permisos) e incluye info de
+      # version — necesita include/generated/compile.h y
+      # security/selinux/flask.h, dos headers que un kernel normal genera
+      # solo, pero que modules_prepare NO cubre (son parte de compilar
+      # init/ y security/selinux/ propiamente, no de preparar módulos
+      # externos). Verificado en los Makefiles del repo: ambos son targets
+      # de make invocables directamente, sin necesidad de un build completo.
+      - name: Generate missing headers (compile.h, flask.h)
+        run: |
+          make O=out ARCH=arm64 \
+            CC="ccache clang" LLVM=1 LD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            include/generated/compile.h security/selinux/flask.h
 
       # Build dirigido SOLO a drivers/kernelsu/ (donde setup.sh deja el
       # symlink al driver), no al kernel completo. Mucho más rápido que
