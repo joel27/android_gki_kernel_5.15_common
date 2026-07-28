@@ -1,4 +1,4 @@
-name: GKI (vermeer · android13-5.15)
+name: ReSukiSU Tech-Kernel LKM (vermeer · android13-5.15)
 
 on:
   workflow_dispatch:
@@ -23,10 +23,10 @@ jobs:
       - name: Restore ccache
         uses: actions/cache@v4
         with:
-          path: \~/.ccache
-          key: \( {{ runner.os }}-ccache-vermeer-gki- \){{ github.sha }}
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-vermeer-lkm-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-ccache-vermeer-gki-
+            ${{ runner.os }}-ccache-vermeer-lkm-
 
       - name: Install dependencies (incluyendo ccache)
         run: |
@@ -34,35 +34,23 @@ jobs:
           sudo apt-get install -y \
             git make bc bison flex libssl-dev \
             libelf-dev python3 ccache \
-            gcc-aarch64-linux-gnu zstd lld llvm-14
+            gcc-aarch64-linux-gnu zstd lld llvm-14 dwarves
 
-      # ==================== CLANG OFICIAL r450784e ====================
-      - name: Setup Clang r450784e (oficial para android13-5.15)
+      - name: Setup Clang r584948b
         run: |
           mkdir -p clang
-          echo "Descargando clang-r450784e (versión oficial)..."
-          
-          # Mirror confiable (ravindu644)
-          curl -fL -o clang.tar.gz "https://github.com/ravindu644/Android-Kernel-Tutorials/releases/download/toolchains/clang-r450784e.tar.gz" || {
-            echo "Fallo en mirror principal, intentando Gitiles..."
-            curl -fL -o clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r450784e.tar.gz"
-          }
-          
+          curl -L -o clang.tar.gz \
+            "https://github.com/bachnxuan/aosp_clang_mirror/releases/download/clang-r584948b-14726520/clang-r584948b.tar.gz"
           tar -xzf clang.tar.gz -C clang
-          
           echo "$PWD/clang/bin" >> $GITHUB_PATH
-          export PATH="$PWD/clang/bin:$PATH"
-          
-          sudo ln -sf /usr/bin/llvm-ar-14      /usr/bin/llvm-ar || true
-          sudo ln -sf /usr/bin/llvm-nm-14      /usr/bin/llvm-nm || true
-          sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy || true
-          sudo ln -sf /usr/bin/llvm-objdump-14 /usr/bin/llvm-objdump || true
-          sudo ln -sf /usr/bin/llvm-strip-14   /usr/bin/llvm-strip || true
-          
+          sudo ln -sf /usr/bin/llvm-ar-14      /usr/bin/llvm-ar
+          sudo ln -sf /usr/bin/llvm-nm-14      /usr/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
+          sudo ln -sf /usr/bin/llvm-objdump-14 /usr/bin/llvm-objdump
+          sudo ln -sf /usr/bin/llvm-strip-14   /usr/bin/llvm-strip
           clang --version
           ld.lld --version
           ccache --version
-          echo "Clang r450784e configurado correctamente"
 
       - name: Clean build tree
         run: |
@@ -95,6 +83,11 @@ jobs:
             < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch
           echo "SuSFS base applied"
 
+      # No hace falta el shim de VMA_PAD_START aquí: ese problema es en
+      # fs/proc/task_mmu.c, y en este workflow NO se compila el kernel
+      # completo (solo el módulo drivers/kernelsu/), así que ese archivo ni
+      # se toca.
+
       - name: Generate defconfig
         run: |
           mkdir -p out
@@ -103,16 +96,26 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             gki_defconfig
 
-      - name: Configure kernel
+      # DIFERENCIA CLAVE vs el workflow normal: CONFIG_KSU se pone en "m"
+      # (módulo) en vez de "y" (compilado adentro del kernel). Confirmado en
+      # el propio Kconfig de ReSukiSU: "config KSU / tristate ... / Choose
+      # "m" here to build KernelSU as LKM". CONFIG_KALLSYMS se queda en y —
+      # es "bool" en Linux (no admite módulo) y KSU lo selecciona como
+      # dependencia obligatoria de todos modos.
+      #
+      # Sobre el hook: en este Kconfig, "KSU_MANUAL_HOOK" tiene
+      # "depends on KSU != m" — o sea que NO es compatible con LKM. Las
+      # opciones que sí quedan disponibles con KSU=m son Tracepoint Hook o
+      # "KSU_SUSFS" (etiquetado como "SUSFS Inline Hook" en su Kconfig, sin
+      # esa restricción). Como quieres SUSFS, se deja esa activa.
+      - name: Configure kernel (KSU como módulo)
         run: |
           ./scripts/config --file out/.config \
             --enable  CONFIG_LTO_CLANG \
             --enable  CONFIG_LTO_CLANG_THIN \
             --disable CONFIG_LTO_CLANG_FULL \
-            --enable  CONFIG_KSU \
+            --module  CONFIG_KSU \
             --enable  CONFIG_KSU_SUSFS \
-            --enable  CONFIG_KSU_INLINE_HOOK \
-            --disable CONFIG_KSU_KPROBES_HOOK \
             --disable CONFIG_KSU_TRACEPOINT_HOOK \
             --enable  CONFIG_PSTORE \
             --enable  CONFIG_PSTORE_RAM \
@@ -135,74 +138,83 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             olddefconfig
 
-      - name: Build kernel (con ccache)
+      # Preparación estándar de kernel para poder compilar módulos sueltos
+      # (genera Module.symvers y headers que el build del módulo necesita).
+      - name: modules_prepare
         run: |
           make -j$(nproc) O=out ARCH=arm64 \
             CC="ccache clang" LLVM=1 LD=ld.lld \
             CROSS_COMPILE=aarch64-linux-gnu- \
+            modules_prepare 2>&1 | tee prepare.log
+
+      # Build dirigido SOLO a drivers/kernelsu/ (donde setup.sh deja el
+      # symlink al driver), no al kernel completo. Mucho más rápido que
+      # "make Image", y no compila nada fuera de ese directorio.
+      - name: Build kernelsu.ko
+        run: |
+          make -j$(nproc) O=out ARCH=arm64 \
+            CC="ccache clang" LLVM=1 LD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            M=drivers/kernelsu modules \
             KBUILD_BUILD_TIMESTAMP="$(date -u +'%a %b %d %H:%M:%S UTC %Y')" \
             KBUILD_BUILD_USER="builder" \
             KBUILD_BUILD_HOST="esk" \
-            Image 2>&1 | tee build.log
+            2>&1 | tee build.log
+          find out -name "kernelsu.ko" -exec cp {} ./kernelsu.ko \;
+          ls -la kernelsu.ko
 
-      - name: Package AnyKernel3
+      # ksuinit es un binario chiquito en Rust (stub de arranque que hace
+      # insmod del .ko antes del init real) — no depende de tus parches de
+      # kernel, así que en vez de meter un toolchain de Rust al workflow solo
+      # para esto, se baja precompilado del release oficial de KernelSU
+      # (verificado: se publica como asset de GitHub Releases, HTTP 200).
+      - name: Fetch ksuinit (binario oficial precompilado)
         run: |
-          git clone --depth=1 \
-            https://github.com/ESK-Project/AnyKernel3.git \
-            -b generic AnyKernel3
-          rm -rf AnyKernel3/config AnyKernel3/modules \
-                 AnyKernel3/patch  AnyKernel3/ramdisk
-          cp out/arch/arm64/boot/Image AnyKernel3/Image
-          zstd -19 --no-progress -q \
-            -o AnyKernel3/Image.zst AnyKernel3/Image
-          rm AnyKernel3/Image
-          cd AnyKernel3
-          sha256sum Image.zst > Image.zst.sha256
-          printf '%s\n' \
-            "properties() { '" \
-            'kernel.string=Tech-Kernel GKI android13-5.15 | ReSukiSU+SUSFS | vermeer' \
-            'do.devicecheck=0' \
-            'do.modules=0' \
-            'do.systemless=0' \
-            'do.cleanup=1' \
-            'do.cleanuponabort=0' \
-            'supported.versions=' \
-            "'; }" \
-            'BLOCK=boot' \
-            'IS_SLOT_DEVICE=1' \
-            'RAMDISK_COMPRESSION=auto' \
-            'PATCH_VBMETA_FLAG=auto' \
-            'NO_MAGISK_CHECK=true' \
-            '. tools/ak3-core.sh' \
-            'ui_print "****************************************"' \
-            'ui_print "   Instalando Tech-Kernel android13-5.15 "' \
-            'ui_print "   Basado en GKI puro (sin merge vendor) "' \
-            'ui_print "****************************************"' \
-            '"$BIN/busybox" sha256sum -cs Image.zst.sha256 || abort "[!] SHA256 mismatch"' \
-            '"$BIN/zstd" -d -q --no-progress -o "$AKHOME/Image" "$AKHOME/Image.zst" || abort "[!] Decompress failed"' \
-            'split_boot' \
-            'if [ -f "$SPLITIMG/ramdisk.cpio" ]; then' \
-            '  unpack_ramdisk; write_boot' \
-            'else' \
-            '  flash_boot' \
-            'fi' \
-            'rm -f "$AKHOME/Image"' \
-            > anykernel.sh
-          cd ..
-          cd AnyKernel3
-          zip -r9 ../Tech-Kernel-android13-5.15-Gki-vermeer.zip . \
-            -x ".git*" -x "*.md"
+          curl -fL -o ksuinit \
+            "https://github.com/tiann/KernelSU/releases/latest/download/ksuinit"
+          chmod +x ksuinit
+          ls -la ksuinit
 
-      - name: Upload kernel zip
+      - name: Package LKM artifact
+        run: |
+          mkdir -p lkm_out
+          cp kernelsu.ko lkm_out/
+          cp ksuinit lkm_out/
+          printf '%s\n' \
+            'Este paquete NO es flasheable directo. Contiene:' \
+            '  - kernelsu.ko  (tu modulo custom, con SUSFS, compilado en CI)' \
+            '  - ksuinit      (stub oficial de KernelSU, binario generico)' \
+            '' \
+            'Para meterlo en tu boot.img / init_boot.img (Android 13+ suele ser' \
+            'init_boot.img), en tu PC o en Termux en el propio telefono, con magiskboot:' \
+            '' \
+            '  magiskboot unpack init_boot.img' \
+            '  magiskboot cpio ramdisk.cpio "mv init init.real"' \
+            '  magiskboot cpio ramdisk.cpio "add 0755 init ksuinit"' \
+            '  magiskboot cpio ramdisk.cpio "add 0755 kernelsu.ko kernelsu.ko"' \
+            '  magiskboot repack init_boot.img' \
+            '  # el resultado queda en new-boot.img, eso es lo que flasheas con fastboot' \
+            '' \
+            'Guarda tu init_boot.img original antes de tocar nada. Este flujo no ha' \
+            'sido probado en tu equipo todavia -- si kernelsu.ko no carga o el manager' \
+            'no lo detecta, es muy probable que sea un choque de version de simbolos' \
+            '(KMI) entre este build y tu kernel stock real, no un error de compilacion.' \
+            > lkm_out/LEEME.txt
+          cd lkm_out
+          zip -r9 ../Tech-Kernel-LKM-vermeer.zip .
+
+      - name: Upload LKM package
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Tech-Kernel-android13-5.15-Gki-vermeer
-          path: Tech-Kernel-android13-5.15-Gki-vermeer.zip
+          name: Tech-Kernel-LKM-vermeer
+          path: Tech-Kernel-LKM-vermeer.zip
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-gki
-          path: build.log
+          name: build-log-lkm
+          path: |
+            build.log
+            prepare.log
