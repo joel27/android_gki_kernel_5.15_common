@@ -1,4 +1,4 @@
-name: ReSukisu LKM
+name: ReSukiSU LKM
 
 on:
   workflow_dispatch:
@@ -147,19 +147,20 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             modules_prepare 2>&1 | tee prepare.log
 
-      # drivers/kernelsu toca SELinux (allowlist/permisos) e incluye info de
-      # version — necesita include/generated/compile.h y
-      # security/selinux/flask.h, dos headers que un kernel normal genera
-      # solo, pero que modules_prepare NO cubre (son parte de compilar
-      # init/ y security/selinux/ propiamente, no de preparar módulos
-      # externos). Verificado en los Makefiles del repo: ambos son targets
-      # de make invocables directamente, sin necesidad de un build completo.
+      # FIX: "include/generated/compile.h" no es invocable directo desde el
+      # make de nivel superior aunque la regla exista en init/Makefile —
+      # Kbuild solo rutea bien los targets ".o" a través de su descenso
+      # recursivo, no rutas de headers generados sueltas ("No rule to make
+      # target"). En vez de apuntar al header, se apunta al .o que lo
+      # necesita: init/version.o genera compile.h como efecto colateral, y
+      # security/selinux/hooks.o genera flask.h + av_permissions.h (todos
+      # los .o de selinux dependen de flask.h en su Makefile).
       - name: Generate missing headers (compile.h, flask.h)
         run: |
           make O=out ARCH=arm64 \
             CC="ccache clang" LLVM=1 LD=ld.lld \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            include/generated/compile.h security/selinux/flask.h
+            init/version.o security/selinux/hooks.o
 
       # Build dirigido SOLO a drivers/kernelsu/ (donde setup.sh deja el
       # symlink al driver), no al kernel completo. Mucho más rápido que
