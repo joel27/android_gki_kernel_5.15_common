@@ -160,6 +160,7 @@ jobs:
           make O=out ARCH=arm64 \
             CC="ccache clang" LLVM=1 LD=ld.lld \
             CROSS_COMPILE=aarch64-linux-gnu- \
+            KCFLAGS="-Wno-error=uninitialized-const-pointer -Wno-error=default-const-init-unsafe" \
             init/version.o security/selinux/hooks.o
 
       # Build dirigido SOLO a drivers/kernelsu/ (donde setup.sh deja el
@@ -171,6 +172,7 @@ jobs:
             CC="ccache clang" LLVM=1 LD=ld.lld \
             CROSS_COMPILE=aarch64-linux-gnu- \
             M=drivers/kernelsu modules \
+            KCFLAGS="-Wno-error=uninitialized-const-pointer -Wno-error=default-const-init-unsafe" \
             KBUILD_BUILD_TIMESTAMP="$(date -u +'%a %b %d %H:%M:%S UTC %Y')" \
             KBUILD_BUILD_USER="builder" \
             KBUILD_BUILD_HOST="esk" \
