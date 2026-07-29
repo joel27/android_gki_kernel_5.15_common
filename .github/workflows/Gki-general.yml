@@ -1,0 +1,229 @@
+name: ReSukiSU Tech-Kernel GKI (general · android13-5.15-2025-07)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+      CCACHE_DIR: /home/runner/.ccache
+
+    steps:
+      - name: Checkout GKI kernel source (android13-5.15-2025-07)
+        uses: actions/checkout@v4
+        with:
+          repository: joel27/android_gki_kernel_5.15_common
+          ref: android13-5.15-2025-07
+          fetch-depth: 1
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-gki-general-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-gki-general-
+
+      - name: Install dependencies (incluyendo ccache)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git make bc bison flex libssl-dev \
+            libelf-dev python3 ccache \
+            gcc-aarch64-linux-gnu zstd lld llvm-14 dwarves
+
+      # build.config.constants pide r563880, pero no se pudo bajar de forma
+      # confiable desde el repo oficial de Google. Se usa r584948b y se
+      # silencian con KCFLAGS (paso "Build kernel") los warnings nuevos que
+      # esa versión más moderna activa.
+      - name: Setup Clang r584948b
+        run: |
+          mkdir -p clang
+          curl -L -o clang.tar.gz \
+            "https://github.com/bachnxuan/aosp_clang_mirror/releases/download/clang-r584948b-14726520/clang-r584948b.tar.gz"
+          tar -xzf clang.tar.gz -C clang
+          echo "$PWD/clang/bin" >> $GITHUB_PATH
+          sudo ln -sf /usr/bin/llvm-ar-14      /usr/bin/llvm-ar
+          sudo ln -sf /usr/bin/llvm-nm-14      /usr/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
+          sudo ln -sf /usr/bin/llvm-objdump-14 /usr/bin/llvm-objdump
+          sudo ln -sf /usr/bin/llvm-strip-14   /usr/bin/llvm-strip
+          clang --version
+          ld.lld --version
+          ccache --version
+
+      - name: Clean build tree
+        run: |
+          rm -rf out
+          rm -f .config .config.old
+          rm -rf include/config include/generated
+
+      - name: Install ReSukiSU (inline hook)
+        run: |
+          curl -fsSL \
+            "https://raw.githubusercontent.com/joel27/ReSukiSU/main/kernel/setup.sh" \
+            | bash -s main
+          echo "ReSukiSU installed"
+
+      - name: Fix sulog type mismatch
+        run: |
+          SULOG=drivers/kernelsu/sulog/event.c
+          if [ -f "$SULOG" ]; then
+            sed -i 's/USER_ARG_NULL,/\&(struct user_arg_ptr){ 0 },/g' "$SULOG"
+            echo "Patched $SULOG"
+          fi
+
+      - name: Apply SuSFS (susfs4ksu 50_)
+        run: |
+          git clone --depth=1 -b gki-android13-5.15 \
+            https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu
+          cp -R /tmp/susfs4ksu/kernel_patches/fs/*      fs/
+          cp -R /tmp/susfs4ksu/kernel_patches/include/* include/
+          patch -p1 --fuzz=3 --no-backup-if-mismatch \
+            < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch
+          echo "SuSFS base applied"
+
+      # No se incluye el "stock_config patch" de esk_builder (para esconder
+      # /proc/config.gz): estaba hardcodeado para kernel 5.10.198, sería
+      # inconsistente en 5.15. Además, siendo un build genérico multi-equipo,
+      # no hay un "config stock" único al cual parecerse de todas formas.
+
+      # El task_mmu.c que copia SuSFS (arriba) usa VMA_PAD_START(vma), macro
+      # de su feature SUS_MAPS. Este repo SÍ la trae nativa (feature real de
+      # GKI para migración a páginas de 16KB, en pgsize_migration_inline.h,
+      # incluida DESPUÉS del último #include del archivo) — por eso el guard
+      # #ifndef, no una definición a ciegas en la línea 1.
+      - name: Fix VMA_PAD_START (SuSFS SUS_MAPS shim)
+        run: |
+          FILE=fs/proc/task_mmu.c
+          if [ -f "$FILE" ] && grep -q "VMA_PAD_START" "$FILE"; then
+            LASTINC=$(grep -n '^#include' "$FILE" | tail -1 | cut -d: -f1)
+            if [ -n "$LASTINC" ]; then
+              awk -v n="$LASTINC" '
+                { print }
+                NR==n { print ""; print "#ifndef VMA_PAD_START"; print "#define VMA_PAD_START(vma) ((vma)->vm_end)"; print "#endif" }
+              ' "$FILE" > "$FILE.tmp" && mv "$FILE.tmp" "$FILE"
+              echo "Shim insertado tras el ultimo #include (con guarda ifndef)"
+            fi
+          else
+            echo "No hizo falta tocar nada"
+          fi
+
+      - name: Generate defconfig
+        run: |
+          mkdir -p out
+          make O=out ARCH=arm64 \
+            CC="ccache clang" LLVM=1 LD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            gki_defconfig
+
+      - name: Configure kernel
+        run: |
+          ./scripts/config --file out/.config \
+            --enable  CONFIG_LTO_CLANG \
+            --enable  CONFIG_LTO_CLANG_THIN \
+            --disable CONFIG_LTO_CLANG_FULL \
+            --enable  CONFIG_KSU \
+            --enable  CONFIG_KSU_SUSFS \
+            --disable CONFIG_KSU_TRACEPOINT_HOOK \
+            --enable  CONFIG_PSTORE \
+            --enable  CONFIG_PSTORE_RAM \
+            --enable  CONFIG_PSTORE_CONSOLE \
+            --enable  CONFIG_TCP_CONG_BBR \
+            --set-str CONFIG_SYSTEM_TRUSTED_KEYS "" \
+            --set-str CONFIG_SYSTEM_EXTRA_CERTIFICATE "" \
+            --disable CONFIG_SYSTEM_EXTRA_CERTIFICATE \
+            --disable CONFIG_INTEGRITY_SIGNATURE \
+            --disable CONFIG_IMA_APPRAISE \
+            --set-str CONFIG_LOCALVERSION "-Tech-Kernel" \
+            --disable CONFIG_LOCALVERSION_AUTO
+
+          # Símbolo real: CONFIG_LLVM_POLLY (no CONFIG_POLLY). Este repo trae
+          # CONFIG_LLVM_POLLY=y de fábrica en gki_defconfig; se apaga porque
+          # el clang que usamos no viene con soporte Polly.
+          ./scripts/config --file out/.config --disable CONFIG_LLVM_POLLY || true
+
+      - name: Finalize config
+        run: |
+          make O=out ARCH=arm64 \
+            CC="ccache clang" LLVM=1 LD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            olddefconfig
+
+      - name: Build kernel (con ccache)
+        run: |
+          make -j$(nproc) O=out ARCH=arm64 \
+            CC="ccache clang" LLVM=1 LD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            KCFLAGS="-Wno-error=uninitialized-const-pointer -Wno-error=default-const-init-unsafe" \
+            KBUILD_BUILD_TIMESTAMP="$(date -u +'%a %b %d %H:%M:%S UTC %Y')" \
+            KBUILD_BUILD_USER="builder" \
+            KBUILD_BUILD_HOST="esk" \
+            Image 2>&1 | tee build.log
+
+      - name: Package AnyKernel3
+        run: |
+          git clone --depth=1 \
+            https://github.com/ESK-Project/AnyKernel3.git \
+            -b generic AnyKernel3
+          rm -rf AnyKernel3/config AnyKernel3/modules \
+                 AnyKernel3/patch  AnyKernel3/ramdisk
+          cp out/arch/arm64/boot/Image AnyKernel3/Image
+          zstd -19 --no-progress -q \
+            -o AnyKernel3/Image.zst AnyKernel3/Image
+          rm AnyKernel3/Image
+          cd AnyKernel3
+          sha256sum Image.zst > Image.zst.sha256
+          printf '%s\n' \
+            "properties() { '" \
+            'kernel.string=Tech-Kernel GKI android13-5.15-2025-07 | ReSukiSU+SUSFS | general' \
+            'do.devicecheck=0' \
+            'do.modules=0' \
+            'do.systemless=0' \
+            'do.cleanup=1' \
+            'do.cleanuponabort=0' \
+            'supported.versions=' \
+            "'; }" \
+            'BLOCK=boot' \
+            'IS_SLOT_DEVICE=1' \
+            'RAMDISK_COMPRESSION=auto' \
+            'PATCH_VBMETA_FLAG=auto' \
+            'NO_MAGISK_CHECK=true' \
+            '. tools/ak3-core.sh' \
+            'ui_print "****************************************"' \
+            'ui_print "  Instalando Tech-Kernel android13-5.15  "' \
+            'ui_print "  GKI general (mediatek/qualcomm) - sin  "' \
+            'ui_print "  merge vendor, depende de KMI matching  "' \
+            'ui_print "****************************************"' \
+            '"$BIN/busybox" sha256sum -cs Image.zst.sha256 || abort "[!] SHA256 mismatch"' \
+            '"$BIN/zstd" -d -q --no-progress -o "$AKHOME/Image" "$AKHOME/Image.zst" || abort "[!] Decompress failed"' \
+            'split_boot' \
+            'if [ -f "$SPLITIMG/ramdisk.cpio" ]; then' \
+            '  unpack_ramdisk; write_boot' \
+            'else' \
+            '  flash_boot' \
+            'fi' \
+            'rm -f "$AKHOME/Image"' \
+            > anykernel.sh
+          cd ..
+          cd AnyKernel3
+          zip -r9 ../Tech-Kernel-android13-5.15-Gki-general.zip . \
+            -x ".git*" -x "*.md"
+
+      - name: Upload kernel zip
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tech-Kernel-android13-5.15-Gki-general
+          path: Tech-Kernel-android13-5.15-Gki-general.zip
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-gki-general
+          path: build.log
