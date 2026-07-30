@@ -1,4 +1,4 @@
-name: GKI (general · android13-5.15-2025-07)
+name: ReSukiSU Tech-Kernel GKI (general · android13-5.15-2025-07)
 
 on:
   workflow_dispatch:
@@ -92,11 +92,45 @@ jobs:
       # inconsistente en 5.15. Además, siendo un build genérico multi-equipo,
       # no hay un "config stock" único al cual parecerse de todas formas.
 
-      # El task_mmu.c que copia SuSFS (arriba) usa VMA_PAD_START(vma), macro
-      # de su feature SUS_MAPS. Este repo SÍ la trae nativa (feature real de
-      # GKI para migración a páginas de 16KB, en pgsize_migration_inline.h,
-      # incluida DESPUÉS del último #include del archivo) — por eso el guard
-      # #ifndef, no una definición a ciegas en la línea 1.
+      - name: Apply ZeroMount VFS patch
+        run: |
+          git clone --depth=1 \
+            https://github.com/Enginex0/Super-Builders.git /tmp/sb
+          PATCH="/tmp/sb/android13-5.15/ReSukiSU/patches/60_zeromount-android13-5.15.patch"
+          if [ -f "$PATCH" ]; then
+            patch -p1 --fuzz=3 --no-backup-if-mismatch < "$PATCH" || true
+            echo "ZeroMount applied"
+          fi
+
+      - name: Fix task_mmu.c for ZeroMount
+        run: |
+          if [ -f fs/proc/task_mmu.c ]; then
+            sed -i \
+              's/zeromount_spoof_mmap_metadata(inode,/zeromount_spoof_mmap_metadata(vma->vm_file ? file_inode(vma->vm_file) : NULL,/g' \
+              fs/proc/task_mmu.c
+            echo "task_mmu.c fixed"
+          fi
+
+      # Solo borra la etiqueta zm_out en archivos donde NO hay ningún
+      # "goto zm_out" en el mismo archivo (la version original de este paso
+      # borraba TODAS las etiquetas sueltas sin importar si se usaban, lo
+      # cual rompía la compilación donde sí se usaban).
+      - name: Remove unused zm_out labels
+        run: |
+          while IFS= read -r f; do
+            if ! grep -q "goto zm_out" "$f"; then
+              sed -i '/^[[:space:]]*zm_out:[[:space:]]*$/d' "$f"
+            fi
+          done < <(grep -rl '^[[:space:]]*zm_out:[[:space:]]*$' --include="*.c" .)
+          echo "zm_out labels cleaned (solo las que de verdad no se usan)"
+
+      # El task_mmu.c ya parcheado por SuSFS + ZeroMount (arriba) usa
+      # VMA_PAD_START(vma), macro de la feature SUS_MAPS de SuSFS. Este repo
+      # SÍ la trae nativa (feature real de GKI para migración a páginas de
+      # 16KB, en pgsize_migration_inline.h, incluida DESPUÉS del último
+      # #include del archivo) — por eso el guard #ifndef, no una definición
+      # a ciegas en la línea 1. Corre al final, después de todos los parches
+      # que tocan este archivo.
       - name: Fix VMA_PAD_START (SuSFS SUS_MAPS shim)
         run: |
           FILE=fs/proc/task_mmu.c
@@ -133,6 +167,7 @@ jobs:
             --enable  CONFIG_PSTORE \
             --enable  CONFIG_PSTORE_RAM \
             --enable  CONFIG_PSTORE_CONSOLE \
+            --enable  CONFIG_ZEROMOUNT \
             --enable  CONFIG_TCP_CONG_BBR \
             --set-str CONFIG_SYSTEM_TRUSTED_KEYS "" \
             --set-str CONFIG_SYSTEM_EXTRA_CERTIFICATE "" \
@@ -180,7 +215,7 @@ jobs:
           sha256sum Image.zst > Image.zst.sha256
           printf '%s\n' \
             "properties() { '" \
-            'kernel.string=Tech-Kernel GKI android13-5.15-2025-07 | ReSukiSU+SUSFS | general' \
+            'kernel.string=Tech-Kernel GKI android13-5.15-2025-07 | ReSukiSU+SUSFS+ZeroMount | general' \
             'do.devicecheck=0' \
             'do.modules=0' \
             'do.systemless=0' \
