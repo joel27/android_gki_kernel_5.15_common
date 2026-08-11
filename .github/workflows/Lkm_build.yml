@@ -87,6 +87,10 @@ jobs:
             < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch
           echo "SuSFS base applied"
 
+      # No se incluye el "stock_config patch" de esk_builder (para esconder
+      # /proc/config.gz): estaba hardcodeado para kernel 5.10.198, sería
+      # inconsistente en 5.15. Se puede rehacer con un config real de 5.15.
+
       - name: Apply ZeroMount VFS patch
         run: |
           git clone --depth=1 \
@@ -126,8 +130,8 @@ jobs:
       # que insertar en la línea 1 causaba "macro redefined" al llegar el
       # #include real más abajo. Ahora se inserta DESPUÉS del último
       # #include, con guarda #ifndef: si el header real ya lo definió, no
-      # hace nada; si no (como pasa en el repo msm-kernel), define el
-      # fallback.
+      # hace nada; si no, define el fallback. Corre al final, después de
+      # todos los parches que tocan este archivo (SuSFS + ZeroMount).
       - name: Fix VMA_PAD_START (SuSFS SUS_MAPS shim)
         run: |
           FILE=fs/proc/task_mmu.c
@@ -143,10 +147,6 @@ jobs:
           else
             echo "No hizo falta tocar nada"
           fi
-
-      # No se incluye el "stock_config patch" de esk_builder (para esconder
-      # /proc/config.gz): estaba hardcodeado para kernel 5.10.198, sería
-      # inconsistente en 5.15. Se puede rehacer con un config real de 5.15.
 
       - name: Generate defconfig
         run: |
@@ -170,6 +170,7 @@ jobs:
             --enable  CONFIG_PSTORE \
             --enable  CONFIG_PSTORE_RAM \
             --enable  CONFIG_PSTORE_CONSOLE \
+            --enable  CONFIG_ZEROMOUNT \
             --enable  CONFIG_TCP_CONG_BBR \
             --set-str CONFIG_SYSTEM_TRUSTED_KEYS "" \
             --set-str CONFIG_SYSTEM_EXTRA_CERTIFICATE "" \
@@ -217,7 +218,7 @@ jobs:
           sha256sum Image.zst > Image.zst.sha256
           printf '%s\n' \
             "properties() { '" \
-            'kernel.string=Tech-Kernel GKI android13-5.15 | ReSukiSU+SUSFS | vermeer' \
+            'kernel.string=Tech-Kernel GKI android13-5.15 | ReSukiSU+SUSFS+ZeroMount | vermeer' \
             'do.devicecheck=0' \
             'do.modules=0' \
             'do.systemless=0' \
