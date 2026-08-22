@@ -101,6 +101,54 @@ jobs:
             echo "ZeroMount applied"
           fi
 
+      # El patch de ZeroMount inserta su bloque "if (filename) { ... }" ANTES
+      # de "struct filename *fname = NULL;" dentro del mismo #ifdef
+      # CONFIG_KSU_SUSFS en vfs_statx() (fs/stat.c) — una vez expandidos los
+      # #ifdef, queda una declaración después de un statement (C89
+      # violation). Se intercambia el orden: fname primero, hook después.
+      # Es seguro: fname se inicializa en NULL (constante) y el hook usa
+      # 'filename' (el parámetro), no 'fname'. Mismo fix verificado en el
+      # workflow de android12-5.10-gki, es genérico (tolera líneas en
+      # blanco entre bloques), no depende de la versión del kernel.
+      - name: Fix declaration-after-statement (ZeroMount hook vs SuSFS fname)
+        run: |
+          python3 << 'PYEOF'
+          import re
+
+          path = "fs/stat.c"
+          with open(path) as f:
+              content = f.read()
+
+          pattern = re.compile(
+              r'(#ifdef CONFIG_KSU_SUSFS[ \t]*\n)'
+              r'\s*'
+              r'(#ifdef CONFIG_ZEROMOUNT[ \t]*\n'
+              r'.*?\n'
+              r'#endif[ \t]*\n)'
+              r'\s*'
+              r'([ \t]*struct filename \*fname = NULL;[ \t]*\n)'
+              r'\s*'
+              r'(#endif)',
+              re.DOTALL
+          )
+
+          def swap(m):
+              return m.group(1) + m.group(3) + m.group(2) + m.group(4)
+
+          new_content, n = pattern.subn(swap, content)
+          if n == 0:
+              print("WARNING: patrón no encontrado, no se aplicó ningún cambio (revisar a mano)")
+          else:
+              with open(path, "w") as f:
+                  f.write(new_content)
+              print(f"Fixed: {n} ocurrencia(s) reordenadas en fs/stat.c")
+          PYEOF
+
+      - name: Verificar fix (contexto alrededor de fname)
+        run: |
+          grep -n -B 5 -A 10 "struct filename \*fname = NULL;" fs/stat.c || \
+            echo "No se encontró la línea — revisar manualmente"
+
       - name: Fix task_mmu.c for ZeroMount
         run: |
           if [ -f fs/proc/task_mmu.c ]; then
@@ -264,3 +312,4 @@ jobs:
         with:
           name: build-log-gki
           path: build.log
+          
