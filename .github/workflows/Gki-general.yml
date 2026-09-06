@@ -87,66 +87,6 @@ jobs:
             < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch
           echo "SuSFS base applied"
 
-      # No se incluye el "stock_config patch" de esk_builder (para esconder
-      # /proc/config.gz): estaba hardcodeado para kernel 5.10.198, sería
-      # inconsistente en 5.15. Además, siendo un build genérico multi-equipo,
-      # no hay un "config stock" único al cual parecerse de todas formas.
-
-      - name: Apply ZeroMount VFS patch
-        run: |
-          git clone --depth=1 \
-            https://github.com/Enginex0/Super-Builders.git /tmp/sb
-          PATCH="/tmp/sb/android13-5.15/ReSukiSU/patches/60_zeromount-android13-5.15.patch"
-          if [ -f "$PATCH" ]; then
-            patch -p1 --fuzz=3 --no-backup-if-mismatch < "$PATCH" || true
-            echo "ZeroMount applied"
-          fi
-
-      - name: Fix task_mmu.c for ZeroMount
-        run: |
-          if [ -f fs/proc/task_mmu.c ]; then
-            sed -i \
-              's/zeromount_spoof_mmap_metadata(inode,/zeromount_spoof_mmap_metadata(vma->vm_file ? file_inode(vma->vm_file) : NULL,/g' \
-              fs/proc/task_mmu.c
-            echo "task_mmu.c fixed"
-          fi
-
-      # Solo borra la etiqueta zm_out en archivos donde NO hay ningún
-      # "goto zm_out" en el mismo archivo (la version original de este paso
-      # borraba TODAS las etiquetas sueltas sin importar si se usaban, lo
-      # cual rompía la compilación donde sí se usaban).
-      - name: Remove unused zm_out labels
-        run: |
-          while IFS= read -r f; do
-            if ! grep -q "goto zm_out" "$f"; then
-              sed -i '/^[[:space:]]*zm_out:[[:space:]]*$/d' "$f"
-            fi
-          done < <(grep -rl '^[[:space:]]*zm_out:[[:space:]]*$' --include="*.c" .)
-          echo "zm_out labels cleaned (solo las que de verdad no se usan)"
-
-      # El task_mmu.c ya parcheado por SuSFS + ZeroMount (arriba) usa
-      # VMA_PAD_START(vma), macro de la feature SUS_MAPS de SuSFS. Este repo
-      # SÍ la trae nativa (feature real de GKI para migración a páginas de
-      # 16KB, en pgsize_migration_inline.h, incluida DESPUÉS del último
-      # #include del archivo) — por eso el guard #ifndef, no una definición
-      # a ciegas en la línea 1. Corre al final, después de todos los parches
-      # que tocan este archivo.
-      - name: Fix VMA_PAD_START (SuSFS SUS_MAPS shim)
-        run: |
-          FILE=fs/proc/task_mmu.c
-          if [ -f "$FILE" ] && grep -q "VMA_PAD_START" "$FILE"; then
-            LASTINC=$(grep -n '^#include' "$FILE" | tail -1 | cut -d: -f1)
-            if [ -n "$LASTINC" ]; then
-              awk -v n="$LASTINC" '
-                { print }
-                NR==n { print ""; print "#ifndef VMA_PAD_START"; print "#define VMA_PAD_START(vma) ((vma)->vm_end)"; print "#endif" }
-              ' "$FILE" > "$FILE.tmp" && mv "$FILE.tmp" "$FILE"
-              echo "Shim insertado tras el ultimo #include (con guarda ifndef)"
-            fi
-          else
-            echo "No hizo falta tocar nada"
-          fi
-
       - name: Generate defconfig
         run: |
           mkdir -p out
@@ -246,7 +186,7 @@ jobs:
             > anykernel.sh
           cd ..
           cd AnyKernel3
-          zip -r9 ../Tech-Kernel-android13-5.15-Gki-general.zip . \
+          zip -r9 ../Tech-Kernel-android13-5.15-Gki.zip . \
             -x ".git*" -x "*.md"
 
       - name: Upload kernel zip
@@ -254,7 +194,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Tech-Kernel-android13-5.15-Gki-general
-          path: Tech-Kernel-android13-5.15-Gki-general.zip
+          path: Tech-Kernel-android13-5.15-Gki.zip
 
       - name: Upload build log
         if: always()
